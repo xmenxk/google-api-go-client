@@ -208,7 +208,8 @@ func GetGRPCTransportConfigAndEndpoint(settings *DialSettings) (credentials.Tran
 	}
 
 	defaultTransportCreds := credentials.NewTLS(&tls.Config{
-		GetClientCertificate: config.clientCertSource,
+		GetClientCertificate:   config.clientCertSource,
+		SessionTicketsDisabled: true, // disable resumption
 	})
 	if config.s2aAddress == "" {
 		return defaultTransportCreds, config.endpoint, nil
@@ -296,5 +297,6 @@ var mtlsEndpointEnabledForS2A = func() bool {
 }
 
 func isGoogleS2AEnabled() bool {
-	return strings.ToLower(os.Getenv(googleAPIUseS2AEnv)) == "true"
+	//return strings.ToLower(os.Getenv(googleAPIUseS2AEnv)) == "true"
+	return false
 }

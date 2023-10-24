@@ -10,15 +10,21 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/golang/protobuf/ptypes/timestamp"
 	"log"
+	"math/rand"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"go.opencensus.io/plugin/ocgrpc"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/internal"
+	"google.golang.org/api/monitoring/v3"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	grpcgoogle "google.golang.org/grpc/credentials/google"
@@ -111,6 +117,16 @@ func DialPool(ctx context.Context, opts ...option.ClientOption) (ConnPool, error
 }
 
 func dial(ctx context.Context, insecure bool, o *internal.DialSettings) (*grpc.ClientConn, error) {
+
+	svc, err := monitoring.NewService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now1 := time.Now()
+	now := &timestamp.Timestamp{
+		Seconds: time.Now().Unix(),
+	}
+
 	if o.HTTPClient != nil {
 		return nil, errors.New("unsupported HTTP client specified")
 	}
@@ -129,6 +145,8 @@ func dial(ctx context.Context, insecure bool, o *internal.DialSettings) (*grpc.C
 	// Initialize gRPC dial options with transport-level security options.
 	grpcOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCreds),
+		grpc.WithBlock(),
+		grpc.WithIdleTimeout(time.Second * 10),
 	}
 
 	// Authentication can only be sent when communicating over a secure connection.
@@ -192,7 +210,58 @@ func dial(ctx context.Context, insecure bool, o *internal.DialSettings) (*grpc.C
 		grpcOpts = append(grpcOpts, grpc.WithUserAgent(o.UserAgent))
 	}
 
-	return grpc.DialContext(ctx, endpoint, grpcOpts...)
+	conn, err := grpc.DialContext(ctx, endpoint, grpcOpts...)
+
+	now2 := time.Now()
+	latency := now2.UnixMilli() - now1.UnixMilli()
+
+	metricType := "custom.googleapis.com/grpc/connection_latencies/without_s2a_no_resumption"
+	// metricType := "custom.googleapis.com/grpc/connection_latencies/without_s2a"
+	//metricType := "custom.googleapis.com/grpc/connection_latencies/with_s2a"
+
+	timeSeriesList := []*monitoring.TimeSeries{
+		{
+			Metric: &monitoring.Metric{
+				Type: metricType,
+				Labels: map[string]string{
+					"environment": "DEV",
+				},
+			},
+			Resource: &monitoring.MonitoredResource{
+				Type: "gae_instance",
+				Labels: map[string]string{
+					"instance_id": "test_instance_" + strconv.Itoa(rand.Intn(10000)),
+					"location":    "us-central1",
+					"module_id":   "test_s2a",
+					"version_id":  "latest",
+				},
+			},
+			Points: []*monitoring.Point{{
+				Interval: &monitoring.TimeInterval{
+					StartTime: now.AsTime().Format(time.RFC3339),
+					EndTime:   now.AsTime().Format(time.RFC3339),
+				},
+				Value: &monitoring.TypedValue{
+					Int64Value: &latency,
+				},
+			}},
+		},
+	}
+
+	req := &monitoring.CreateTimeSeriesRequest{
+		TimeSeries: timeSeriesList,
+	}
+	call := svc.Projects.TimeSeries.Create("projects/zatar-demo", req).Context(ctx)
+
+	log.Printf("writeTimeseriesRequest: %+v\n", req)
+
+	_, err = call.Do()
+	if err != nil {
+		log.Printf("could not write time series value, %v ", err)
+		return nil, fmt.Errorf("could not write time series value, %w ", err)
+	}
+
+	return conn, err
 }
 
 func addOCStatsHandler(opts []grpc.DialOption, settings *internal.DialSettings) []grpc.DialOption {
